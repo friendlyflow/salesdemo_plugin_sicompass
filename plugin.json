@@ -1,0 +1,18 @@
+{
+  "name": "salesdemo",
+  "displayName": "sales demo",
+  "type": "wasm",
+  "entry": "plugin.wasm",
+  "version": "0.2.0",
+  "minAppVersion": "0.1.21",
+  "description": "salesdemo-description",
+  "settings": [
+    {
+      "type": "text",
+      "label": "save folder (product configuration)",
+      "key": "saveFolder",
+      "default": "Downloads"
+    }
+  ],
+  "permissions": {}
+}

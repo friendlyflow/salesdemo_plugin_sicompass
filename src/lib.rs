@@ -1,48 +1,38 @@
-//! Sales demo provider — a Rust port of the former `sales_demo.ts`.
+//! The sales demo, a sicompass WASM plugin.
 //!
 //! Walks a product-configuration tree (`assets/equipment1.json`) and renders it as
 //! FFON: mandatory entries appear directly, optional ones are offered under an
-//! "Add element:" section as `<button>` tags.
+//! "Add element:" section as `<button>` tags, which add them to the
+//! configuration. `d` at the root shows the air handling unit diagram.
 //!
-//! # Why this is no longer a script
+//! It was a built-in of the sicompass app (`lib/lib_sales_demo`, before that a
+//! TypeScript script) and is the pilot of the move to plugins installed from
+//! the Store: the same code, in the sandbox, with no permissions at all. Its
+//! only data are its own assets.
 //!
-//! It used to be TypeScript run through `bun`, wrapped in a `ScriptProvider`. That
-//! meant shipping and spawning a general-purpose interpreter, which cannot pass an
-//! App Store sandbox — the same reason third-party plugins moved to WebAssembly.
-//! `bun` was never bundled in release archives either, so the demo only worked in a
-//! dev checkout. Follows `lib_tutorial` and `lib_remote`, both already ported the
-//! same way.
-//!
-//! It is a *built-in*, not a plugin, so it stays native and compiled-in: built-ins
-//! are the trusted computing base. The sandbox is for third-party code.
+//! [`Demo`] is the tree logic, host-independent and unit-tested natively;
+//! [`SalesDemo`] connects it to the plugin interface.
 
 use serde::Deserialize;
 use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
-use sicompass_sdk::{FfonElement, FfonObject, Provider};
+use sicompass_pdk::{DashboardKind, Descriptor, Plugin, export_plugin, host};
+use sicompass_sdk::{FfonElement, FfonObject};
 
-/// The product tree, embedded at compile time.
-///
-/// The script read this from disk next to itself, which meant a dev-checkout path
-/// and a runtime failure mode. It is fixed data, so it belongs in the binary.
+/// The product tree, compiled into the component. It is fixed data, and
+/// compiled in it cannot go missing.
 const EQUIPMENT_JSON: &str = include_str!("../assets/equipment1.json");
 
-/// The diagram shown by the `d` key, compiled in next to `equipment1.json`.
-///
-/// It used to be a loose file under the repository's top-level `assets/` tree,
-/// because the host loads and scales images itself and so needed a *path*. It still
-/// gets a name rather than bytes — but now an `asset:` URI, which the host resolves
-/// through the SDK registry. Nothing to ship, nothing to list in five packaging
-/// manifests, nothing to go missing.
-const DASHBOARD_IMAGE: &[u8] =
-    include_bytes!("../assets/115-Draw-through-Air-Handling-Unit-Diagram-1.webp");
+/// The diagram shown by `d` at the root: a file in this plugin's `assets/`,
+/// which the host reads and scales itself, so its bytes never cross the sandbox.
+const DASHBOARD_IMAGE_FILE: &str = "115-Draw-through-Air-Handling-Unit-Diagram-1.webp";
 
-/// What `dashboard_image_path` hands the host. Hyphenated, not the `"sales demo"`
-/// the provider itself is registered as: this string ends up inside a URI, where a
-/// space is bad hygiene for no gain. A built-in picks its own asset namespace, so
-/// the two need not match. (A WASM plugin does not get that freedom — the host keys
-/// its namespace on the manifest name.)
+/// The plugin's name, as in `plugin.json`. A plugin's `asset:` namespace is its
+/// manifest name, which the host enforces.
+const PLUGIN_NAME: &str = "salesdemo";
+
+/// `asset:salesdemo/<diagram>`, what `dashboard_image_path` hands the host.
 const DASHBOARD_IMAGE_URI: &str =
-    "asset:sales-demo/115-Draw-through-Air-Handling-Unit-Diagram-1.webp";
+    "asset:salesdemo/115-Draw-through-Air-Handling-Unit-Diagram-1.webp";
 
 /// The cardinality vocabulary. An entry's first element is one of these; anything
 /// else means the entry is not a configuration node and is skipped.
@@ -323,31 +313,29 @@ fn build_item(key: &str, raw: &[Node]) -> FfonElement {
 }
 
 // ---------------------------------------------------------------------------
-// Provider
+// The tree
 // ---------------------------------------------------------------------------
 
 /// Renders the product tree, one level at a time.
-pub struct SalesDemoProvider {
+pub struct Demo {
     root: Node,
     path: String,
 }
 
-impl Default for SalesDemoProvider {
+impl Default for Demo {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SalesDemoProvider {
+impl Demo {
     pub fn new() -> Self {
         // A parse failure means the embedded asset is malformed, which is a build
         // problem rather than a runtime one; an empty tree renders as an empty view
-        // instead of taking the app down.
-        let root = serde_json::from_str::<Node>(EQUIPMENT_JSON).unwrap_or_else(|e| {
-            eprintln!("sales demo: equipment1.json is malformed: {e}");
-            Node::Object(Vec::new())
-        });
-        SalesDemoProvider {
+        // instead of trapping.
+        let root = serde_json::from_str::<Node>(EQUIPMENT_JSON)
+            .unwrap_or_else(|_| Node::Object(Vec::new()));
+        Demo {
             root,
             path: "/".to_owned(),
         }
@@ -360,23 +348,8 @@ impl SalesDemoProvider {
     fn at_root(&self) -> bool {
         self.path_parts().is_empty()
     }
-}
 
-#[async_trait::async_trait]
-impl Provider for SalesDemoProvider {
-    fn name(&self) -> &str {
-        "sales demo"
-    }
-
-    fn display_name(&self) -> String {
-        "sales demo".to_owned()
-    }
-
-    fn version(&self) -> Option<&str> {
-        Some(env!("CARGO_PKG_VERSION"))
-    }
-
-    fn fetch(&mut self) -> Vec<FfonElement> {
+    pub fn fetch(&mut self) -> Vec<FfonElement> {
         let parts = self.path_parts();
         match raw_at_path(&self.root, &parts) {
             // A leaf list of choices renders as its options directly.
@@ -393,13 +366,7 @@ impl Provider for SalesDemoProvider {
 
     /// Structural editing is available exactly where the "Add element:"
     /// section is, which is the level whose entries the user configures.
-    ///
-    /// The app used to work this out by looking for an `Obj` keyed
-    /// "Add element:" among the cursor's siblings. That reads a *shape* to
-    /// infer an *intent*, and any provider that happened to render a section
-    /// with that key inherited a keymap it never asked for. Answering here says
-    /// the same thing directly, and from the side that built the section.
-    fn supports_structural_edit(&self) -> bool {
+    pub fn supports_structural_edit(&self) -> bool {
         let parts = self.path_parts();
         raw_at_path(&self.root, &parts)
             .filter(|node| node.as_array().is_none())
@@ -411,15 +378,15 @@ impl Provider for SalesDemoProvider {
             .unwrap_or(false)
     }
 
-    fn current_path(&self) -> &str {
+    pub fn current_path(&self) -> &str {
         &self.path
     }
 
-    fn set_current_path(&mut self, path: &str) {
+    pub fn set_current_path(&mut self, path: &str) {
         self.path = path.to_owned();
     }
 
-    fn push_path(&mut self, segment: &str) {
+    pub fn push_path(&mut self, segment: &str) {
         if self.path == "/" {
             self.path = format!("/{segment}");
         } else {
@@ -428,17 +395,20 @@ impl Provider for SalesDemoProvider {
         }
     }
 
-    fn pop_path(&mut self) {
+    pub fn pop_path(&mut self) {
         match self.path.rfind('/') {
             Some(0) | None => self.path = "/".to_owned(),
             Some(slash) => self.path.truncate(slash),
         }
     }
 
-    fn dashboard_image_path(&self) -> Option<&str> {
-        // Only at the root, matching the script: it emitted `dashboardImage` in the
-        // root payload only, and `ScriptProvider` cleared the field on every
-        // subsequent fetch.
+    /// A product configuration can be saved and opened again.
+    pub fn supports_config_files(&self) -> bool {
+        true
+    }
+
+    /// The diagram, only at the root.
+    pub fn dashboard_image_path(&self) -> Option<&'static str> {
         if self.at_root() {
             Some(DASHBOARD_IMAGE_URI)
         } else {
@@ -448,15 +418,12 @@ impl Provider for SalesDemoProvider {
 
     /// Build the element an "Add element:" button inserts.
     ///
-    /// This is what the demo is *for*: the buttons under "Add element:" add optional
-    /// parts to a product configuration, and without this they do nothing. The
-    /// button carries `one-opt:` when the entry may be added at most once, and the
-    /// inserted node is tagged accordingly so the app knows which rule applies.
-    ///
-    /// An entry that is itself an input field is inserted as a bare tagged string;
-    /// anything else becomes a section pre-filled with the children it has in the
-    /// tree, so adding "heating" brings its options along.
-    fn create_element(&mut self, element_key: &str) -> Option<FfonElement> {
+    /// The button carries `one-opt:` when the entry may be added at most once,
+    /// and the inserted node is tagged accordingly so the app knows which rule
+    /// applies. An entry that is itself an input field is inserted as a bare
+    /// tagged string; anything else becomes a section pre-filled with the
+    /// children it has in the tree, so adding "heating" brings its options.
+    pub fn create_element(&mut self, element_key: &str) -> Option<FfonElement> {
         let (key, tagged) = match element_key.strip_prefix("one-opt:") {
             Some(key) => (key, sicompass_sdk::tags::format_one_opt(key)),
             None => (
@@ -470,8 +437,6 @@ impl Provider for SalesDemoProvider {
         }
 
         let mut obj = FfonObject::new(tagged);
-        // Populate from the node's own position in the tree, one level below where
-        // the user currently is.
         let mut parts = self.path_parts();
         parts.push(key);
         if let Some(node) = raw_at_path(&self.root, &parts) {
@@ -488,51 +453,81 @@ impl Provider for SalesDemoProvider {
         }
         Some(FfonElement::Obj(obj))
     }
+}
 
-    fn supports_config_files(&self) -> bool {
-        true
+// ---------------------------------------------------------------------------
+// The plugin
+// ---------------------------------------------------------------------------
+
+/// The sales demo as the host sees it.
+pub struct SalesDemo {
+    demo: Demo,
+}
+
+impl Plugin for SalesDemo {
+    fn new() -> Self {
+        SalesDemo { demo: Demo::new() }
+    }
+
+    fn describe(&self) -> Descriptor {
+        Descriptor {
+            name: PLUGIN_NAME.to_owned(),
+            display_name: host::translate("salesdemo-display-name"),
+            version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+            supports_config_files: self.demo.supports_config_files(),
+            // Where the tree shows "Add element:"; `structural_edit_here` says where.
+            supports_structural_edit: true,
+            // The diagram at the root; `dashboard_here` says where.
+            dashboard_kind: DashboardKind::Image,
+            ..Default::default()
+        }
+    }
+
+    fn fetch(&mut self) -> Vec<FfonElement> {
+        self.demo.fetch()
+    }
+
+    fn current_path(&self) -> &str {
+        self.demo.current_path()
+    }
+
+    fn set_current_path(&mut self, path: &str) {
+        self.demo.set_current_path(path);
+    }
+
+    fn push_path(&mut self, segment: &str) {
+        self.demo.push_path(segment);
+    }
+
+    fn pop_path(&mut self) {
+        self.demo.pop_path();
+    }
+
+    fn structural_edit_here(&self) -> bool {
+        self.demo.supports_structural_edit()
+    }
+
+    fn dashboard_here(&self) -> bool {
+        self.demo.dashboard_image_path().is_some()
+    }
+
+    fn dashboard_image_path(&self) -> Option<String> {
+        Some(sicompass_pdk::assets::uri(PLUGIN_NAME, DASHBOARD_IMAGE_FILE))
+    }
+
+    fn create_element(&mut self, key: &str) -> Option<FfonElement> {
+        self.demo.create_element(key)
     }
 }
 
-// ---------------------------------------------------------------------------
-// SDK registration
-// ---------------------------------------------------------------------------
-
-/// Register the sales demo with the SDK factory and manifest registries.
-pub fn register() {
-    // The diagram, published before the factory so a provider built by the next line
-    // already resolves it. Overwrites, so calling this twice is harmless.
-    sicompass_sdk::assets::register_bytes(
-        "sales-demo",
-        "115-Draw-through-Air-Handling-Unit-Diagram-1.webp",
-        DASHBOARD_IMAGE,
-    );
-
-    sicompass_sdk::register_provider_factory("sales demo", || Box::new(SalesDemoProvider::new()));
-    sicompass_sdk::register_builtin_manifest(
-        sicompass_sdk::BuiltinManifest::new("sales demo", "sales demo").with_settings(vec![
-            sicompass_sdk::SettingDecl::text(
-                "sales demo",
-                "save folder (product configuration)",
-                "saveFolder",
-                "Downloads",
-            ),
-        ]),
-    );
-}
+export_plugin!(SalesDemo);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn provider() -> SalesDemoProvider {
-        SalesDemoProvider::new()
-    }
-
-    #[test]
-    fn register_does_not_panic() {
-        // Double-registration is safe (the registry is append-only).
-        super::register();
+    fn provider() -> Demo {
+        Demo::new()
     }
 
     // --- the embedded asset ---
@@ -602,27 +597,29 @@ mod tests {
     }
 
     #[test]
-    fn the_diagram_resolves_and_is_still_a_webp() {
-        // The host decodes these bytes itself, so being registered is not enough:
-        // they also have to still be an image the `image` crate can sniff.
-        register();
-        let bytes = sicompass_sdk::assets::resolve(DASHBOARD_IMAGE_URI)
-            .expect("the diagram must resolve through the registry");
+    fn the_diagram_ships_in_assets_and_is_still_a_webp() {
+        // The host decodes these bytes itself, so the file being there is not
+        // enough: it also has to still be an image the `image` crate can sniff.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join(DASHBOARD_IMAGE_FILE);
+        let bytes = std::fs::read(&path).expect("the diagram must be in assets/");
         assert_eq!(&bytes[..4], b"RIFF", "not a RIFF container any more");
         assert_eq!(&bytes[8..12], b"WEBP", "not a WebP any more");
     }
 
     #[test]
-    fn the_uri_constant_matches_the_key_register_publishes_under() {
+    fn the_uri_constant_names_the_diagram_in_this_plugins_namespace() {
         // A literal typo here would compile fine and show up only as a dashboard
-        // that draws nothing.
+        // that draws nothing. The namespace must be the manifest name, which the
+        // host enforces.
         assert_eq!(
             DASHBOARD_IMAGE_URI,
-            sicompass_sdk::assets::uri(
-                "sales-demo",
-                "115-Draw-through-Air-Handling-Unit-Diagram-1.webp"
-            )
+            sicompass_pdk::assets::uri(PLUGIN_NAME, DASHBOARD_IMAGE_FILE)
         );
+        let manifest: serde_json::Value =
+            serde_json::from_str(include_str!("../plugin.json")).unwrap();
+        assert_eq!(manifest["name"], PLUGIN_NAME);
     }
 
     #[test]
@@ -926,5 +923,33 @@ mod tests {
             build_item("empty", empty.as_array().unwrap()).as_str(),
             Some("empty")
         );
+    }
+
+    // --- the plugin wrapper: per-level answers the host polls ---
+
+    #[test]
+    fn the_diagram_is_offered_only_at_the_root() {
+        let mut p = <SalesDemo as Plugin>::new();
+        assert!(p.poll().dashboard_here);
+        let first = p.fetch().into_iter().find_map(|e| match e {
+            FfonElement::Obj(o) if o.key != "Add element:" => Some(o.key),
+            _ => None,
+        });
+        Plugin::push_path(&mut p, &first.expect("a navigable entry at the root"));
+        assert!(!p.poll().dashboard_here);
+        Plugin::pop_path(&mut p);
+        assert!(p.poll().dashboard_here);
+    }
+
+    #[test]
+    fn structural_editing_is_offered_where_add_element_is() {
+        let mut p = <SalesDemo as Plugin>::new();
+        assert_eq!(
+            p.poll().structural_edit_here,
+            p.demo.supports_structural_edit()
+        );
+        // Somewhere without an "Add element:" section, it is off.
+        Plugin::set_current_path(&mut p, "/no such entry");
+        assert!(!p.poll().structural_edit_here);
     }
 }
