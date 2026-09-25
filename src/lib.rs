@@ -512,7 +512,10 @@ impl Plugin for SalesDemo {
     }
 
     fn dashboard_image_path(&self) -> Option<String> {
-        Some(sicompass_pdk::assets::uri(PLUGIN_NAME, DASHBOARD_IMAGE_FILE))
+        Some(sicompass_pdk::assets::uri(
+            PLUGIN_NAME,
+            DASHBOARD_IMAGE_FILE,
+        ))
     }
 
     fn create_element(&mut self, key: &str) -> Option<FfonElement> {
