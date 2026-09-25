@@ -8,7 +8,7 @@ version = "0.2.0"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "The sales demo for sicompass: a product configuration tree, as a WASM plugin"
-repository = "https://github.com/friendlyflow/salesdemo_plugin_sicompass"
+repository = "https://github.com/friendlyflow/salesdemo-plugin-sicompass"
 # A plugin ships as a signed release the sicompass Store installs, never on crates.io.
 publish = false
 

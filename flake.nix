@@ -1,9 +1,9 @@
 {
   # Skeleton for a sicompass WASM plugin, from sicompass's /split-repo. Fill in
-  # salesdemo_plugin_sicompass: the sicompass sales demo as a WASM plugin. The plugin is built for wasm32-wasip2, which nixpkgs' rustc
+  # salesdemo-plugin-sicompass: the sicompass sales demo as a WASM plugin. The plugin is built for wasm32-wasip2, which nixpkgs' rustc
   # has no std for, so the toolchain comes from rust-overlay (as in
   # sicompass-plugin-sdk's flake). flake.lock pins it.
-  description = "salesdemo_plugin_sicompass: the sicompass sales demo as a WASM plugin";
+  description = "salesdemo-plugin-sicompass: the sicompass sales demo as a WASM plugin";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

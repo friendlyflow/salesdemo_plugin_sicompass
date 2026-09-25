@@ -1,4 +1,4 @@
-# salesdemo_plugin_sicompass
+# salesdemo-plugin-sicompass
 
 *The Sicompass sales demo: configure a product by walking its tree.*
 
